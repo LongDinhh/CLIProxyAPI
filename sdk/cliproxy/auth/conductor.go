@@ -121,8 +121,6 @@ type Manager struct {
 	hook      Hook
 	mu        sync.RWMutex
 	auths     map[string]*Auth
-	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
-	providerOffsets map[string]int
 
 	// Retry controls request retry behavior.
 	requestRetry     atomic.Int32
@@ -155,12 +153,11 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:           store,
-		executors:       make(map[string]ProviderExecutor),
-		selector:        selector,
-		hook:            hook,
-		auths:           make(map[string]*Auth),
-		providerOffsets: make(map[string]int),
+		store:     store,
+		executors: make(map[string]ProviderExecutor),
+		selector:  selector,
+		hook:      hook,
+		auths:     make(map[string]*Auth),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

@@ -9,17 +9,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/state"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
-type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-}
+// It uses state.OffsetStore for distributed offset tracking across multiple instances.
+type RoundRobinSelector struct{}
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
@@ -177,29 +175,25 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
+// Uses state.OffsetStore for distributed offset tracking.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	_ = ctx
 	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	key := provider + ":" + model
-	s.mu.Lock()
-	if s.cursors == nil {
-		s.cursors = make(map[string]int)
-	}
-	index := s.cursors[key]
+	key := state.OffsetKey(provider + ":" + model)
 
-	if index >= 2_147_483_640 {
+	// Use OffsetStore for distributed offset tracking
+	index, err := state.GetOffsetStore().Increment(ctx, key)
+	if err != nil {
+		// Fallback to 0 on error
 		index = 0
 	}
 
-	s.cursors[key] = index + 1
-	s.mu.Unlock()
-	// log.Debugf("available: %d, index: %d, key: %d", len(available), index, index%len(available))
-	return available[index%len(available)], nil
+	// Handle overflow (atomic counter resets in store if needed)
+	return available[(index-1)%len(available)], nil
 }
 
 // Pick selects the first available auth for the provider in a deterministic manner.

@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/state"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -137,6 +138,13 @@ func main() {
 		objectStoreBucket    string
 		objectStoreLocalPath string
 		objectStoreInst      *store.ObjectTokenStore
+		useMongoStore        bool
+		mongoStoreURI        string
+		mongoStoreDatabase   string
+		mongoStoreAuthColl   string
+		mongoStoreConfigColl string
+		mongoStoreLocalPath  string
+		mongoStoreInst       *store.MongoStore
 	)
 
 	wd, err := os.Getwd()
@@ -151,6 +159,11 @@ func main() {
 			log.WithError(errLoad).Warn("failed to load .env file")
 		}
 	}
+
+	// Initialize Redis-backed state stores for horizontal scaling.
+	// This reads REDIS_URL from environment and configures distributed
+	// SignatureStore, OffsetStore, and QuotaStore implementations.
+	state.InitRedisStateStores()
 
 	lookupEnv := func(keys ...string) (string, bool) {
 		for _, key := range keys {
@@ -212,6 +225,34 @@ func main() {
 	if value, ok := lookupEnv("OBJECTSTORE_LOCAL_PATH", "objectstore_local_path"); ok {
 		objectStoreLocalPath = value
 	}
+	if value, ok := lookupEnv("MONGOSTORE_URI", "mongostore_uri"); ok {
+		useMongoStore = true
+		mongoStoreURI = value
+	}
+	if useMongoStore {
+		if value, ok := lookupEnv("MONGOSTORE_DATABASE", "mongostore_database"); ok {
+			mongoStoreDatabase = value
+		}
+		if value, ok := lookupEnv("MONGOSTORE_AUTH_COLLECTION", "mongostore_auth_collection"); ok {
+			mongoStoreAuthColl = value
+		}
+		if value, ok := lookupEnv("MONGOSTORE_CONFIG_COLLECTION", "mongostore_config_collection"); ok {
+			mongoStoreConfigColl = value
+		}
+		if value, ok := lookupEnv("MONGOSTORE_LOCAL_PATH", "mongostore_local_path"); ok {
+			mongoStoreLocalPath = value
+		}
+		if mongoStoreLocalPath == "" {
+			if writableBase != "" {
+				mongoStoreLocalPath = writableBase
+			} else {
+				mongoStoreLocalPath = wd
+			}
+		}
+		usePostgresStore = false
+		useGitStore = false
+		useObjectStore = false
+	}
 
 	// Check for cloud deploy mode only on first execution
 	// Read env var name in uppercase: DEPLOY
@@ -252,6 +293,35 @@ func main() {
 		if err == nil {
 			cfg.AuthDir = pgStoreInst.AuthDir()
 			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
+		}
+	} else if useMongoStore {
+		mongoStoreLocalPath = filepath.Join(mongoStoreLocalPath, "mongostore")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		mongoStoreInst, err = store.NewMongoStore(ctx, store.MongoStoreConfig{
+			URI:        mongoStoreURI,
+			Database:   mongoStoreDatabase,
+			AuthColl:   mongoStoreAuthColl,
+			ConfigColl: mongoStoreConfigColl,
+			SpoolDir:   mongoStoreLocalPath,
+		})
+		cancel()
+		if err != nil {
+			log.Errorf("failed to initialize mongo token store: %v", err)
+			return
+		}
+		examplePath := filepath.Join(wd, "config.example.yaml")
+		ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		if errBootstrap := mongoStoreInst.Bootstrap(ctx, examplePath); errBootstrap != nil {
+			cancel()
+			log.Errorf("failed to bootstrap mongo-backed config: %v", errBootstrap)
+			return
+		}
+		cancel()
+		configFilePath = mongoStoreInst.ConfigPath()
+		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		if err == nil {
+			cfg.AuthDir = mongoStoreInst.AuthDir()
+			log.Infof("mongo-backed token store enabled, workspace path: %s", mongoStoreInst.WorkDir())
 		}
 	} else if useObjectStore {
 		if objectStoreLocalPath == "" {
@@ -434,6 +504,8 @@ func main() {
 	// Register the shared token store once so all components use the same persistence backend.
 	if usePostgresStore {
 		sdkAuth.RegisterTokenStore(pgStoreInst)
+	} else if useMongoStore {
+		sdkAuth.RegisterTokenStore(mongoStoreInst)
 	} else if useObjectStore {
 		sdkAuth.RegisterTokenStore(objectStoreInst)
 	} else if useGitStore {

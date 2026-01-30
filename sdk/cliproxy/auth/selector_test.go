@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/state"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -33,7 +34,8 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 }
 
 func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
-	t.Parallel()
+	// Reset global offset store for deterministic test
+	state.ResetOffsetStore()
 
 	selector := &RoundRobinSelector{}
 	auths := []*Auth{
@@ -58,7 +60,8 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 }
 
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
-	t.Parallel()
+	// Reset global offset store for deterministic test
+	state.ResetOffsetStore()
 
 	selector := &RoundRobinSelector{}
 	auths := []*Auth{

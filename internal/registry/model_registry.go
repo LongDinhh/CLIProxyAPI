@@ -12,8 +12,17 @@ import (
 	"time"
 
 	misc "github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/state"
 	log "github.com/sirupsen/logrus"
 )
+
+// RegistryQuotaExpiry is the default cooldown duration for quota exceeded status.
+const RegistryQuotaExpiry = 5 * time.Minute
+
+// registryQuotaKey generates a quota key for registry-specific tracking.
+func registryQuotaKey(clientID, modelID string) string {
+	return "registry:" + clientID + ":" + modelID
+}
 
 // ModelInfo represents information about an available model
 type ModelInfo struct {
@@ -587,7 +596,8 @@ func (r *ModelRegistry) unregisterClientInternal(clientID string) {
 	r.triggerModelsUnregistered(provider, clientID)
 }
 
-// SetModelQuotaExceeded marks a model as quota exceeded for a specific client
+// SetModelQuotaExceeded marks a model as quota exceeded for a specific client.
+// Uses distributed state.QuotaStore for horizontal scaling.
 // Parameters:
 //   - clientID: The client that exceeded quota
 //   - modelID: The model that exceeded quota
@@ -598,11 +608,18 @@ func (r *ModelRegistry) SetModelQuotaExceeded(clientID, modelID string) {
 	if registration, exists := r.models[modelID]; exists {
 		now := time.Now()
 		registration.QuotaExceededClients[clientID] = &now
+
+		// Set in distributed store for cross-instance visibility
+		ctx := context.Background()
+		key := registryQuotaKey(clientID, modelID)
+		_ = state.GetQuotaStore().SetExceeded(ctx, key, now.Add(RegistryQuotaExpiry), "quota")
+
 		log.Debugf("Marked model %s as quota exceeded for client %s", modelID, clientID)
 	}
 }
 
-// ClearModelQuotaExceeded removes quota exceeded status for a model and client
+// ClearModelQuotaExceeded removes quota exceeded status for a model and client.
+// Clears from both local map and distributed state.QuotaStore.
 // Parameters:
 //   - clientID: The client to clear quota status for
 //   - modelID: The model to clear quota status for
@@ -612,7 +629,11 @@ func (r *ModelRegistry) ClearModelQuotaExceeded(clientID, modelID string) {
 
 	if registration, exists := r.models[modelID]; exists {
 		delete(registration.QuotaExceededClients, clientID)
-		// log.Debugf("Cleared quota exceeded status for model %s and client %s", modelID, clientID)
+
+		// Clear from distributed store
+		ctx := context.Background()
+		key := registryQuotaKey(clientID, modelID)
+		_ = state.GetQuotaStore().Clear(ctx, key)
 	}
 }
 
@@ -706,17 +727,17 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	defer r.mutex.RUnlock()
 
 	models := make([]map[string]any, 0)
-	quotaExpiredDuration := 5 * time.Minute
+	ctx := context.Background()
 
-	for _, registration := range r.models {
+	for modelID, registration := range r.models {
 		// Check if model has any non-quota-exceeded clients
 		availableClients := registration.Count
-		now := time.Now()
 
-		// Count clients that have exceeded quota but haven't recovered yet
+		// Count clients that have exceeded quota using distributed store
 		expiredClients := 0
-		for _, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+		for clientID := range registration.QuotaExceededClients {
+			key := registryQuotaKey(clientID, modelID)
+			if exceeded, _, _ := state.GetQuotaStore().IsExceeded(ctx, key); exceeded {
 				expiredClients++
 			}
 		}
@@ -886,13 +907,13 @@ func (r *ModelRegistry) GetModelCount(modelID string) int {
 	defer r.mutex.RUnlock()
 
 	if registration, exists := r.models[modelID]; exists {
-		now := time.Now()
-		quotaExpiredDuration := 5 * time.Minute
+		ctx := context.Background()
 
-		// Count clients that have exceeded quota but haven't recovered yet
+		// Count clients that have exceeded quota using distributed store
 		expiredClients := 0
-		for _, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) < quotaExpiredDuration {
+		for clientID := range registration.QuotaExceededClients {
+			key := registryQuotaKey(clientID, modelID)
+			if exceeded, _, _ := state.GetQuotaStore().IsExceeded(ctx, key); exceeded {
 				expiredClients++
 			}
 		}

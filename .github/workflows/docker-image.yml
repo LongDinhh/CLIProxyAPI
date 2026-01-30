@@ -2,12 +2,15 @@ name: docker-image
 
 on:
   push:
+    branches:
+      - main
     tags:
       - v*
+  workflow_dispatch:
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: eceasy/cli-proxy-api
+  DOCKERHUB_REPO: longdinhh/cliproxyapi
 
 jobs:
   docker_amd64:

@@ -10,7 +10,7 @@ on:
 
 env:
   APP_NAME: CLIProxyAPI
-  DOCKERHUB_REPO: longdinhh/cliproxyapi
+  DOCKERHUB_REPO: lnogdv/cliproxyapi
 
 jobs:
   docker_amd64:
